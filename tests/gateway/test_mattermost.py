@@ -359,12 +359,13 @@ class TestMattermostMentionBehavior:
         self.adapter._bot_username = "hermes-bot"
         self.adapter.handle_message = AsyncMock()
 
-    def _make_event(self, message, channel_type="O", channel_id="chan_456"):
+    def _make_event(self, message, channel_type="O", channel_id="chan_456", root_id=None):
         post_data = {
             "id": "post_mention",
             "user_id": "user_123",
             "channel_id": channel_id,
             "message": message,
+            "root_id": root_id or "",
         }
         return {
             "event": "posted",
@@ -392,6 +393,64 @@ class TestMattermostMentionBehavior:
             os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
             await self.adapter._handle_ws_event(self._make_event("hello", channel_id="chan_456"))
             assert self.adapter.handle_message.called
+
+    # Thread participation (Discord d863773c81 / Matrix 276e6cc52d / Slack parity: threads the
+    # bot replied in skip the mention gate; thread_require_mention re-gates for multi-bot threads).
+
+    @pytest.mark.asyncio
+    async def test_participated_thread_reply_needs_no_mention(self):
+        """Once the bot is in a thread, follow-up replies there are admitted without @mention."""
+        self.adapter._threads.mark("root_1")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            os.environ.pop("MATTERMOST_THREAD_REQUIRE_MENTION", None)
+            await self.adapter._handle_ws_event(self._make_event("keep going", root_id="root_1"))
+            assert self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_thread_require_mention_true_regates_participated_thread(self):
+        """thread_require_mention=true re-gates bot threads (multi-bot loop guard)."""
+        self.adapter._threads.mark("root_1")
+        with patch.dict(os.environ, {"MATTERMOST_THREAD_REQUIRE_MENTION": "true"}):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            await self.adapter._handle_ws_event(self._make_event("keep going", root_id="root_1"))
+            assert not self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_thread_participation_does_not_free_top_level_posts(self):
+        """The bypass is thread-scoped: top-level channel posts still need @mention."""
+        self.adapter._threads.mark("root_1")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            os.environ.pop("MATTERMOST_THREAD_REQUIRE_MENTION", None)
+            await self.adapter._handle_ws_event(self._make_event("hello"))
+            assert not self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_unparticipated_thread_reply_still_gated(self):
+        """A thread the bot never posted in is someone else's conversation: still gated."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            os.environ.pop("MATTERMOST_THREAD_REQUIRE_MENTION", None)
+            await self.adapter._handle_ws_event(self._make_event("between two humans", root_id="root_9"))
+            assert not self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_accepted_thread_reply_records_participation(self):
+        """An admitted thread post marks the root, so the next bare reply is free."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            await self.adapter._handle_ws_event(
+                self._make_event("@hermes-bot keep going", root_id="root_2"))
+            assert self.adapter.handle_message.called
+            assert "root_2" in self.adapter._threads
+
+    def test_yaml_bridge_carries_thread_require_mention(self):
+        """config.yaml ``mattermost.thread_require_mention`` seeds extra/env like the sibling keys."""
+        from plugins.platforms.mattermost.adapter import _apply_yaml_config
+        with patch.dict(os.environ, {}, clear=False):
+            seeded = _apply_yaml_config({}, {"thread_require_mention": True})
+        assert seeded == {"thread_require_mention": True}
 
 
 # ---------------------------------------------------------------------------
