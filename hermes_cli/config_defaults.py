@@ -1630,6 +1630,9 @@ DEFAULT_CONFIG = {
 
     "mattermost": {
         "require_mention": True,  # require @mention to respond in channels
+        # Replies in threads the bot already participated in skip the @mention gate
+        # (Discord/Slack/Matrix parity); set true to require @mention there too, e.g. multi-bot threads.
+        "thread_require_mention": False,
         "free_response_channels": "",  # comma-separated channel IDs answered without mention
         "allowed_channels": "",  # if set, ONLY respond in these channel IDs (whitelist)
         "channel_prompts": {},  # per-channel ephemeral system prompts

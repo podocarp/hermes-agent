@@ -20,7 +20,7 @@ from urllib.parse import unquote as _unquote
 from typing import Any, Dict, List, Optional, Tuple
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.helpers import MessageDeduplicator
+from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker
 from gateway.platforms.helpers import cancel_task
 from gateway.platforms.base import gateway_trust_env, BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
@@ -123,6 +123,7 @@ class MattermostAdapter(BasePlatformAdapter):
         self._last_post_status: Optional[int] = None  # POST-only, read by the broken-thread-root fallback
         self._last_post_error: str = ""
         self._dedup = MessageDeduplicator()
+        self._threads = ThreadParticipationTracker("mattermost")  # require_mention bypass (see _apply_channel_gating)
 
     # --- HTTP helpers ---
 
@@ -493,10 +494,12 @@ class MattermostAdapter(BasePlatformAdapter):
                 logger.info("Mattermost: WebSocket closed (%s)", kind)
                 break
 
-    def _apply_channel_gating(self, channel_id: str, message_text: str) -> Optional[str]:
+    def _apply_channel_gating(self, channel_id: str, message_text: str,
+                              thread_id: Optional[str] = None) -> Optional[str]:
         """Mention-gate a non-DM post; return the cleaned text, or None to ignore it. allowed_channels is a
         whitelist checked first (@mentions elsewhere are ignored); require_mention (default true) is
-        bypassed in free_response_channels."""
+        bypassed in free_response_channels and in threads the bot has already replied in
+        (ThreadParticipationTracker) — thread_require_mention re-gates those for multi-bot threads."""
         allowed_channels = _channel_id_set(_extra_or_secret(self.config.extra, "allowed_channels", "MATTERMOST_ALLOWED_CHANNELS", blank_is_unset=False))
         if allowed_channels and channel_id not in allowed_channels:
             logger.debug("Mattermost: ignoring message in non-allowed channel: %s", channel_id)
@@ -507,8 +510,14 @@ class MattermostAdapter(BasePlatformAdapter):
             _extra_or_secret(self.config.extra, "free_response_channels", "MATTERMOST_FREE_RESPONSE_CHANNELS", blank_is_unset=False))
         mention_patterns = [f"@{self._bot_username}", f"@{self._bot_user_id}"]
         has_mention = any(pattern.lower() in message_text.lower() for pattern in mention_patterns)
-        if require_mention and channel_id not in free_channels and not has_mention:
+        in_bot_thread = bool(thread_id and thread_id in self._threads)
+        if require_mention and channel_id not in free_channels and not in_bot_thread and not has_mention:
             logger.debug("Mattermost: skipping non-DM message without @mention (channel=%s)", channel_id)
+            return None
+        if in_bot_thread and channel_id not in free_channels and not has_mention and str(
+                _extra_or_secret(self.config.extra, "thread_require_mention", "MATTERMOST_THREAD_REQUIRE_MENTION", "false", blank_is_unset=False)
+        ).lower() not in {"false", "0", "no"}:
+            logger.debug("Mattermost: skipping thread reply without @mention (thread_require_mention=true, thread=%s)", thread_id)
             return None
         if has_mention:  # strip the @mention so the agent sees clean input
             for pattern in mention_patterns:
@@ -562,8 +571,8 @@ class MattermostAdapter(BasePlatformAdapter):
             return
         channel_id, is_dm = post.get("channel_id", ""), data.get("channel_type", "O") == "D"
         message_text = post.get("message", "")
-        if not is_dm:  # DMs need no gating; channels are mention-gated.
-            message_text = self._apply_channel_gating(channel_id, message_text)
+        if not is_dm:  # DMs need no gating; channels are mention-gated (bot threads bypass, see the gate).
+            message_text = self._apply_channel_gating(channel_id, message_text, thread_id=post.get("root_id") or None)
             if message_text is None:
                 return
         # Thread support: replies use root_id; in thread mode a top-level channel post is itself a valid root.
@@ -584,6 +593,8 @@ class MattermostAdapter(BasePlatformAdapter):
             chat_id=channel_id, chat_type=_CHANNEL_TYPE_MAP.get(data.get("channel_type", "O"), "channel"),
             user_id=sender_id, user_name=data.get("sender_name", "").lstrip("@") or sender_id,
             thread_id=thread_id, message_id=post_id)
+        if thread_id:
+            await self._threads.mark_async(str(thread_id))  # covers real roots and synthetic ones alike
         from gateway.platforms.base import resolve_channel_prompt
         await self.handle_message(MessageEvent(
             text=message_text, message_type=msg_type, source=source, raw_message=post, message_id=post_id,
@@ -701,6 +712,7 @@ def interactive_setup() -> None:
 
 _YAML_BRIDGE = (  # (yaml key, env var, kind) for apply_yaml_bridge; allowed_channels is a whitelist
     ("require_mention", "MATTERMOST_REQUIRE_MENTION", "lower"),
+    ("thread_require_mention", "MATTERMOST_THREAD_REQUIRE_MENTION", "lower"),
     ("free_response_channels", "MATTERMOST_FREE_RESPONSE_CHANNELS", "csv"),
     ("allowed_channels", "MATTERMOST_ALLOWED_CHANNELS", "csv"))
 

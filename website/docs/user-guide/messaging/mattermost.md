@@ -153,6 +153,9 @@ MATTERMOST_ALLOWED_USERS=3uo8dkh1p7g1mfk49ear5fzs5c
 # Optional: respond without @mention (default: true = require mention)
 # MATTERMOST_REQUIRE_MENTION=false
 
+# Optional: require @mention even in threads the bot already replied in (default: false)
+# MATTERMOST_THREAD_REQUIRE_MENTION=true
+
 # Optional: channels where bot responds without @mention (comma-separated channel IDs)
 # MATTERMOST_FREE_RESPONSE_CHANNELS=channel_id_1,channel_id_2
 ```
@@ -219,7 +222,13 @@ By default, the bot only responds in channels when `@mentioned`. You can change 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MATTERMOST_REQUIRE_MENTION` | `true` | Set to `false` to respond to all messages in channels (DMs always work). |
+| `MATTERMOST_THREAD_REQUIRE_MENTION` | `false` | Set to `true` to require `@mention` in threads the bot already replied in, e.g. when several bots share one thread. |
 | `MATTERMOST_FREE_RESPONSE_CHANNELS` | _(none)_ | Comma-separated channel IDs where the bot responds without `@mention`, even when require_mention is true. |
+
+Once Hermes has replied in a thread, follow-up replies inside that thread are answered **without** an
+`@mention` — the same behavior Discord, Slack and Matrix adapters have. Threads the bot never posted in
+are left alone, and top-level channel posts still require a mention. Participation is tracked in
+`~/.hermes/mattermost_threads.json` (most recent 500 threads).
 
 To find a channel ID in Mattermost: open the channel, click the channel name header, and look for the ID in the URL or channel details.
 
